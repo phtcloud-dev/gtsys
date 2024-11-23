@@ -33,3 +33,4 @@
 - `forcereboot` - 掉电重启(直接对主板I/O掉电重启，注意该操作只支持较新主板，否则会陷入主板卡机)
 - `-i` - 将当前进程(父进程)提升至SYSTEM32
 
+![image](https://github.com/user-attachments/assets/549f8d41-cd7f-4566-a7f6-e60b89a8480b)
