@@ -11,7 +11,7 @@
 
 ## 操作类型
 
-- `pid` - 将指定PID的权限提升至SYSTEM32
+- `pid` - 将指定PID的权限提升至SYSTEM
 - `copy <PID1> <PID2>` - 将PID1的权限设置成PID2的权限
 - `hide <PID>` - 将指定PID隐藏
 - `setpid <PID1> <PID2>` - 将PID1替换为PID2
