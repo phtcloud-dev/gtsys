@@ -32,6 +32,10 @@
 #define IOCTL_IO_DELALLHPID CTL_CODE(FILE_DEVICE_UNKNOWN,0x823,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_IO_LISTALLHPID CTL_CODE(FILE_DEVICE_UNKNOWN,0x824,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_IO_OBREG CTL_CODE(FILE_DEVICE_UNKNOWN,0x825,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_IO_KPATH CTL_CODE(FILE_DEVICE_UNKNOWN,0x826,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_IO_ONLYWINDOWS CTL_CODE(FILE_DEVICE_UNKNOWN,0x827,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_IO_GETALLPIDLIST CTL_CODE(FILE_DEVICE_UNKNOWN,0x828,METHOD_BUFFERED,FILE_ANY_ACCESS)
+
 typedef struct {
     DWORD orgpid;
     DWORD newpid;
@@ -50,8 +54,10 @@ typedef struct
     DWORD token;
     DWORD ppl;
     DWORD timer;
+    DWORD timerclose;
     char* name[256];
     char* path[1024];
+    char sid[256];
 }pidinfo;
 
 typedef struct
@@ -62,8 +68,10 @@ typedef struct
     DWORD token;
     DWORD ppl;
     DWORD timer;
+    DWORD timerclose;
     char* name[256];
     char* path[1024];
+    char sid[256];
     int end;
 }pidall;
 
@@ -80,6 +88,12 @@ typedef struct
     DWORD pid9;
     DWORD pid10;
 }procpidexlist;
+
+typedef struct
+{
+    char* path[1024];
+}kpath;
+
 
 typedef long NTSTATUS;
 
@@ -158,7 +172,7 @@ void reboot()
 
 void help() {
     std::cerr << "请提供操作类型和相应的PID参数." << std::endl;
-    printf("操作: pid | copy | hide | setpid | ppl | suspend | resume | kill | ramclear | info | chain | listall | safe | unsafe | listsafe | gethandle | drophandle | listhandle | setobcallback | setparent | shutdown | reboot | kernelshutdown | kernelreboot | forcereboot | -i\n");
+    printf("操作: pid | copy | hide | setpid | ppl | suspend | resume | kill | killpath | ramclear | info | chain | listall | forcelistall | onlywindows | safe | unsafe | listsafe | gethandle | drophandle | listhandle | setobcallback | setparent | shutdown | reboot | kernelshutdown | kernelreboot | forcereboot | -i\n");
     printf("pid <PID> - 将指定PID的权限提升至SYSTEM32\n");
     printf("copy <PID1> <PID2> - 将PID1的权限设置成PID2的权限\n");
     printf("hide <PID> - 将指定PID隐藏\n");
@@ -167,11 +181,14 @@ void help() {
     printf("suspend <PID> - 将指定PID强行挂起\n");
     printf("resume <PID> - 将指定PID强行恢复运行\n");
     printf("kill <PID> - 将指定PID强行关闭\n");
+    printf("killpath <PATH> - 强制关闭所有路径含PATH的进程\n");
     printf("ramclear <PID> - 将指定PID强行清除内存\n");
     printf("info <PID> - 获取指定PID的信息\n");
     printf("chain <PID> - 获取指定PID的进程链\n");
     printf("listall - 枚举所有进程\n");
+    printf("forcelistall - 暴力枚举所有进程\n");
     printf("safe - 保护指定PID\n");
+    printf("onlywindows - 强制关闭除Windows路径下的所有进程\n");
     printf("unsafe - 取消保护指定PID\n");
     printf("listsafe - 列出受保护的PID列表\n");
     printf("gethandle - 绕过指定进程的保护\n");
@@ -192,19 +209,56 @@ DWORD chainpid(DWORD pidin , HANDLE hDevice) {
     pidinfo pidinfo;
     DWORD pid = pidin;
     DWORD ref_len = 0;
+    bool is87error = false;
     DeviceIoControl(hDevice, IOCTL_IO_INFO, &pid, sizeof(pid), &pidinfo, sizeof(pidinfo), &ref_len, NULL);
     if (pidinfo.suc == 1) {
         char str[15];
         printf("PID: %d\tImage name[14]: %s\n", pid, pidinfo.name);
         printf("Image path: %s\n", pidinfo.path);
+
+        // --------- 打印 SID 对应用户名 ---------
+        PSID sid = (PSID)pidinfo.sid; // pidinfo.sid 是二进制 SID
+        char name[256] = { 0 };
+        char domain[256] = { 0 };
+        DWORD nameLen = sizeof(name);
+        DWORD domainLen = sizeof(domain);
+        SID_NAME_USE sidType;
+
+        if (LookupAccountSidA(NULL, sid, name, &nameLen, domain, &domainLen, &sidType))
+        {
+            printf("User: %s\\%s\n", domain, name);
+        }
+        else
+        {
+            int errorcode = GetLastError();
+            printf("Failed to lookup SID. Error: %lu\n", errorcode);
+            if (errorcode == 87) 
+            {
+                is87error = true;
+            }
+        }
         time_t timestamp = pidinfo.timer;
-        struct tm* tm_info;
-        tm_info = localtime(&timestamp);
+        time_t timestampclose = pidinfo.timerclose;
+        struct tm tm_info;
+        struct tm tm_infoclose;
+
+        localtime_s(&tm_info, &timestamp);
+        localtime_s(&tm_infoclose, &timestampclose);
 
        
         char buffertimer[26];
-        strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", tm_info);
+        strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", &tm_info);
+        char buffertimerclose[26];
+        strftime(buffertimerclose, sizeof(buffertimerclose), "%Y-%m-%d %H:%M:%S", &tm_infoclose);
         printf("CreateTime: %s\n", buffertimer);
+        if (pidinfo.timerclose == 0)
+        {
+            printf("CloseTime: N/A\n");
+        }
+        else
+        {
+            printf("CloseTime: %s\n", buffertimerclose);
+        }
         printf("Parent process pid: %d\n", pidinfo.father);
         printf("TOKEN: %p\n", pidinfo.token);
         printf("PPL: %p\n", pidinfo.ppl);
@@ -244,6 +298,14 @@ DWORD chainpid(DWORD pidin , HANDLE hDevice) {
             printf("UNKNOW LEVEL %p\n", tmpppl);
             break;
         }
+        if (pidinfo.timerclose == 0)
+        {
+            printf("Process Still Running\n");
+        }
+        else
+        {
+            printf("Process Exited\n");
+        }
         return pidinfo.father;
     }
     else {
@@ -263,14 +325,50 @@ DWORD getalltmp(DWORD pidin, HANDLE hDevice) {
         char str[15];
         printf("PID: %d\tImage name[14]: %s\n", pidinfo.pid, pidinfo.name);
         printf("Image path: %s\n", pidinfo.path);
+        // --------- 打印 SID 对应用户名 ---------
+        PSID sid = (PSID)pidinfo.sid; // pidinfo.sid 是二进制 SID
+        char name[256] = { 0 };
+        char domain[256] = { 0 };
+        DWORD nameLen = sizeof(name);
+        DWORD domainLen = sizeof(domain);
+        SID_NAME_USE sidType;
+        bool is87error = false;
+        if (LookupAccountSidA(NULL, sid, name, &nameLen, domain, &domainLen, &sidType))
+        {
+            printf("User: %s\\%s\n", domain, name);
+        }
+        else
+        {
+            int errorcode = GetLastError();
+            printf("Failed to lookup SID. Error: %lu\n", errorcode);
+            if (errorcode == 87)
+            {
+                is87error = true;
+            }
+        }
+
         time_t timestamp = pidinfo.timer;
-        struct tm* tm_info;
-        tm_info = localtime(&timestamp);
+        time_t timestampclose = pidinfo.timerclose;
+        struct tm tm_info;
+        struct tm tm_infoclose;
+
+        localtime_s(&tm_info, &timestamp);
+        localtime_s(&tm_infoclose, &timestampclose);
 
        
         char buffertimer[26];
-        strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", tm_info);
+        strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", &tm_info);
+        char buffertimerclose[26];
+        strftime(buffertimerclose, sizeof(buffertimerclose), "%Y-%m-%d %H:%M:%S", &tm_infoclose);
         printf("CreateTime: %s\n", buffertimer);
+        if (pidinfo.timerclose == 0)
+        {
+            printf("CloseTime: N/A\n");
+        }
+        else
+        {
+            printf("CloseTime: %s\n", buffertimerclose);
+        }
         printf("Parent process pid: %d\n", pidinfo.father);
         printf("TOKEN: %p\n", pidinfo.token);
         printf("PPL: %p\n", pidinfo.ppl);
@@ -310,6 +408,18 @@ DWORD getalltmp(DWORD pidin, HANDLE hDevice) {
             printf("UNKNOW LEVEL %p\n", tmpppl);
             break;
         }
+        if (pidinfo.timerclose == 0)
+        {
+            printf("Process Still Running\n");
+        }
+        else
+        {
+            printf("Process Exited\n");
+        }
+        if (is87error) 
+        {
+            return 0;
+        }
         return pidinfo.pid;
     }
     else {
@@ -318,6 +428,118 @@ DWORD getalltmp(DWORD pidin, HANDLE hDevice) {
 
 }
 
+
+DWORD getallprocesslist(DWORD pidin, HANDLE hDevice) {
+    pidall pidinfo;
+    DWORD pid = pidin;
+    DWORD ref_len = 0;
+    DeviceIoControl(hDevice, IOCTL_IO_GETALLPIDLIST, &pid, sizeof(pid), &pidinfo, sizeof(pidall), &ref_len, NULL);
+    if (pidinfo.end == 0) {
+        char str[15];
+        printf("PID: %d\tImage name[14]: %s\n", pidinfo.pid, pidinfo.name);
+        printf("Image path: %s\n", pidinfo.path);
+        // --------- 打印 SID 对应用户名 ---------
+        PSID sid = (PSID)pidinfo.sid; // pidinfo.sid 是二进制 SID
+        char name[256] = { 0 };
+        char domain[256] = { 0 };
+        DWORD nameLen = sizeof(name);
+        DWORD domainLen = sizeof(domain);
+        SID_NAME_USE sidType;
+        bool is87error = false;
+        if (LookupAccountSidA(NULL, sid, name, &nameLen, domain, &domainLen, &sidType))
+        {
+            printf("User: %s\\%s\n", domain, name);
+        }
+        else
+        {
+            int errorcode = GetLastError();
+            printf("Failed to lookup SID. Error: %lu\n", errorcode);
+            if (errorcode == 87)
+            {
+                is87error = true;
+            }
+        }
+
+        time_t timestamp = pidinfo.timer;
+        time_t timestampclose = pidinfo.timerclose;
+        struct tm tm_info;
+        struct tm tm_infoclose;
+
+        localtime_s(&tm_info, &timestamp);
+        localtime_s(&tm_infoclose, &timestampclose);
+
+
+        char buffertimer[26];
+        strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", &tm_info);
+        char buffertimerclose[26];
+        strftime(buffertimerclose, sizeof(buffertimerclose), "%Y-%m-%d %H:%M:%S", &tm_infoclose);
+        printf("CreateTime: %s\n", buffertimer);
+        if (pidinfo.timerclose == 0)
+        {
+            printf("CloseTime: N/A\n");
+        }
+        else
+        {
+            printf("CloseTime: %s\n", buffertimerclose);
+        }
+        printf("Parent process pid: %d\n", pidinfo.father);
+        printf("TOKEN: %p\n", pidinfo.token);
+        printf("PPL: %p\n", pidinfo.ppl);
+        DWORD tmpppl = pidinfo.ppl & 0x00000000000000ff;
+        switch (tmpppl) {
+        case 0x0:
+            printf("PPL LEVEL: 0 - PS_PROTECTED_NONE\n");
+            break;
+        case 0x11:
+            printf("PPL LEVEL: 1 - PS_PROTECTED_AUTHENTICODE_LIGHT\n");
+            break;
+        case 0x21:
+            printf("PPL LEVEL: 2 - PS_PROTECTED_AUTHENTICODE\n");
+            break;
+        case 0x31:
+            printf("PPL LEVEL: 3 - PS_PROTECTED_ANTIMALWARE_LIGHT\n");
+            break;
+        case 0x41:
+            printf("PPL LEVEL: 4 - PS_PROTECTED_LSA_LIGHT\n");
+            break;
+        case 0x51:
+            printf("PPL LEVEL: 5 - PS_PROTECTED_WINDOWS_LIGHT\n");
+            break;
+        case 0x52:
+            printf("PPL LEVEL: 6 - PS_PROTECTED_WINDOWS\n");
+            break;
+        case 0x61:
+            printf("PPL LEVEL: 7 - PS_PROTECTED_WINTCB_LIGHT\n");
+            break;
+        case 0x62:
+            printf("PPL LEVEL: 8 - PS_PROTECTED_WINTCB\n");
+            break;
+        case 0x72:
+            printf("PPL LEVEL: 9 - PS_PROTECTED_SYSTEM\n");
+            break;
+        default:
+            printf("UNKNOW LEVEL %p\n", tmpppl);
+            break;
+        }
+        if (pidinfo.timerclose == 0)
+        {
+            printf("Process Still Running\n");
+        }
+        else
+        {
+            printf("Process Exited\n");
+        }
+        if (is87error)
+        {
+            return 0;
+        }
+        return pidinfo.pid;
+    }
+    else {
+        return 0;
+    }
+
+}
 
 void handleDeviceIoControl(int argc, char* argv[]) {
     printf("Made by phtcloud\n");
@@ -409,14 +631,46 @@ void handleDeviceIoControl(int argc, char* argv[]) {
             char str[15];
             printf("PID: %d\tImage name[14]: %s\n", pid, pidinfo.name);
             printf("Image path: %s\n", pidinfo.path);
+
+            // --------- 打印 SID 对应用户名 ---------
+            PSID sid = (PSID)pidinfo.sid; // pidinfo.sid 是二进制 SID
+            char name[256] = { 0 };
+            char domain[256] = { 0 };
+            DWORD nameLen = sizeof(name);
+            DWORD domainLen = sizeof(domain);
+            SID_NAME_USE sidType;
+
+            if (LookupAccountSidA(NULL, sid, name, &nameLen, domain, &domainLen, &sidType))
+            {
+                printf("User: %s\\%s\n", domain, name);
+            }
+            else
+            {
+                printf("Failed to lookup SID. Error: %lu\n", GetLastError());
+            }
+
             time_t timestamp = pidinfo.timer;
-            struct tm* tm_info;
-            tm_info = localtime(&timestamp);
+            time_t timestampclose = pidinfo.timerclose;
+            struct tm tm_info;
+            struct tm tm_infoclose;
+
+            localtime_s(&tm_info, &timestamp);
+            localtime_s(&tm_infoclose, &timestampclose);
 
            
             char buffertimer[26];
-            strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", tm_info);
+            strftime(buffertimer, sizeof(buffertimer), "%Y-%m-%d %H:%M:%S", &tm_info);
+            char buffertimerclose[26];
+            strftime(buffertimerclose, sizeof(buffertimerclose), "%Y-%m-%d %H:%M:%S", &tm_infoclose);
             printf("CreateTime: %s\n", buffertimer);
+            if (pidinfo.timerclose == 0)
+            {
+                printf("CloseTime: N/A\n");
+            }
+            else
+            {
+                printf("CloseTime: %s\n", buffertimerclose);
+            }
             printf("Parent process pid: %d\n", pidinfo.father);
             printf("TOKEN: %p\n", pidinfo.token);
             printf("PPL: %p\n", pidinfo.ppl);
@@ -456,13 +710,21 @@ void handleDeviceIoControl(int argc, char* argv[]) {
                 printf("UNKNOW LEVEL %p\n", tmpppl);
                 break;
             }
+            if (pidinfo.timerclose == 0)
+            {
+                printf("Process Still Running\n");
+            }
+            else
+            {
+                printf("Process Exited\n");
+            }
         }
         else {
             printf("PID: %d get info error\n", pid);
         }
     }
 
-    else if (operation == "listall") {
+    else if (operation == "forcelistall") {
         DWORD pid = 4;
         DWORD toto = 0;
         while (1) {
@@ -473,6 +735,20 @@ void handleDeviceIoControl(int argc, char* argv[]) {
                 break;
             }
             pid = pid + 4;
+            toto++;
+        }
+    }
+
+    else if (operation == "listall") {
+        DWORD pid = 0;
+        DWORD toto = 0;
+        while (1) {
+            printf("--------------------------------------------------\n");
+            pid = getallprocesslist(pid, hDevice);
+            if (pid == 0) {
+                printf("共%d个进程\n", toto);
+                break;
+            }
             toto++;
         }
     }
@@ -491,11 +767,44 @@ void handleDeviceIoControl(int argc, char* argv[]) {
         DWORD pid = 1;
         DeviceIoControl(hDevice, IOCTL_IO_SHUTDOWNHAL, &pid, sizeof(pid), &output, sizeof(output), &ref_len, NULL);
     }
+    else if (operation == "onlywindows") {
+        DWORD pid = 1;
+        DeviceIoControl(hDevice, IOCTL_IO_ONLYWINDOWS, &pid, sizeof(pid), &output, sizeof(output), &ref_len, NULL);
+    }
     else if (operation == "kernelreboot") {
         DWORD pid = 1;
         DeviceIoControl(hDevice, IOCTL_IO_REBOTHAL, &pid, sizeof(pid), &output, sizeof(output), &ref_len, NULL);
     }
+    else if (operation == "killpath") {
+        if (argc < 3) {
+            std::cerr << "请提供一个路径或进程名参数." << std::endl;
+            printf("killpath <name> - 按名称结束进程\n");
+            CloseHandle(hDevice);
+            return;
+        }
 
+        const char* targetPath = argv[2]; // 直接传字符串
+        DWORD output = 0;
+        DWORD ref_len = 0;
+
+        BOOL result = DeviceIoControl(
+            hDevice,
+            IOCTL_IO_KPATH,          // 内核定义的 IOCTL
+            (LPVOID)targetPath,      // 输入缓冲区是字符串
+            (DWORD)(strlen(targetPath) + 1),
+            &output,                 // 输出缓冲区
+            sizeof(output),
+            &ref_len,
+            NULL
+        );
+
+        if (result && output == 1) {
+            printf("按路径/名称 %s 结束进程成功\n", targetPath);
+        }
+        else {
+            printf("按路径/名称 %s 结束进程失败\n", targetPath);
+        }
+}
 
 
     else if (operation == "suspend") {
