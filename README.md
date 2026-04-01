@@ -1,6 +1,7 @@
 # 操作手册
 
 **Made by phtcloud**
+支持内核版本 10.0.10240.* - 10.0.26200.*(或者更新)
 
 请提供操作类型和相应的PID参数。
 
@@ -14,11 +15,14 @@
 - `suspend <PID>` - 将指定PID强行挂起
 - `resume <PID>` - 将指定PID强行恢复运行
 - `kill <PID>` - 将指定PID强行关闭
+- `killpath <PATH>` - 强制关闭所有路径含PATH的进程
 - `ramclear <PID>` - 将指定PID强行清除内存
 - `info <PID>` - 获取指定PID的信息
 - `chain <PID>` - 获取指定PID的进程链
 - `listall` - 枚举所有进程
+- `forcelistall` - 暴力枚举所有进程
 - `safe <PID>` - 保护指定PID
+- `onlywindows` - 强制关闭除Windows路径下的所有进程
 - `unsafe <PID>` - 取消保护指定PID
 - `listsafe` - 列出受保护的PID列表
 - `gethandle <PID>` - 绕过指定进程的保护
