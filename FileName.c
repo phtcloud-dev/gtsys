@@ -41,7 +41,9 @@ NTKERNELAPI UCHAR* PsGetProcessImageFileName(__in PEPROCESS Process);
 #define IOCTL_IO_DELALLHPID CTL_CODE(FILE_DEVICE_UNKNOWN,0x823,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_IO_LISTALLHPID CTL_CODE(FILE_DEVICE_UNKNOWN,0x824,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_IO_OBREG CTL_CODE(FILE_DEVICE_UNKNOWN,0x825,METHOD_BUFFERED,FILE_ANY_ACCESS)
-
+#define IOCTL_IO_KPATH CTL_CODE(FILE_DEVICE_UNKNOWN,0x826,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_IO_ONLYWINDOWS CTL_CODE(FILE_DEVICE_UNKNOWN,0x827,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_IO_GETALLPIDLIST CTL_CODE(FILE_DEVICE_UNKNOWN,0x828,METHOD_BUFFERED,FILE_ANY_ACCESS)
 
 #define PROCESS_TERMINATE                  (0x0001)
 #define PROCESS_CREATE_THREAD              (0x0002)
@@ -82,6 +84,16 @@ typedef struct _KLDR_DATA_TABLE_ENTRY {
 
 
 
+DWORD CreateTimeoffset = 0x1f8;
+DWORD UniqueProcessIdoffset = 0x1d0;
+DWORD Protectionoffset = 0x5fa;
+DWORD Tokenoffset = 0x248;
+DWORD InheritedFromUniqueProcessIdoffset = 0x2d0;
+DWORD ImageFileNameoffset = 0x338;
+DWORD ExitTimeoffset = 0x5c0;
+DWORD Flagsoffset = 0x1f4;
+DWORD ActiveProcessLinksoffset = 0x1d8;
+
 PVOID g_RegistrationHandle = NULL;
 
 
@@ -91,6 +103,11 @@ typedef struct
 	DWORD orgpid;
 	DWORD newpid;
 }newpiddata;
+
+typedef struct
+{
+	char* path[1024];
+}kpath;
 
 typedef struct
 {
@@ -105,8 +122,10 @@ typedef struct
 	DWORD token;
 	DWORD ppl;
 	DWORD timer;
+	DWORD timerclose;
 	char* name[256];
 	char* path[1024];
+	char sid[256];
 }pidinfo;
 
 typedef struct
@@ -117,8 +136,10 @@ typedef struct
 	DWORD token;
 	DWORD ppl;
 	DWORD timer;
+	DWORD timerclose;
 	char* name[256];
 	char* path[1024];
+	char sid[256];
 	int end;
 }pidall;
 
@@ -184,7 +205,11 @@ BOOLEAN get_PspCidTable(ULONG64* tableAddr);
 BOOL parse_table_3(ULONG64 BaseAddr, int table1, int table2, int table3);
 BOOL parse_table_2(ULONG64 BaseAddr, INT index2, int table1, int table2);
 BOOL parse_table_1(ULONG64 BaseAddr, INT index1, INT index2, int table1);
+PEPROCESS GetProcessByName3();
 DWORD GETTIMER(DWORD i);
+DWORD GETTIMERCLOSE(DWORD i);
+DWORD GetAllProcessByPath(const char* targetPath);
+DWORD GetAllProcessbylink(DWORD lastpid1);
 
 VOID ForceReboot()
 {
@@ -562,6 +587,27 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 		pCurrentEprocess = LookupProcess((HANDLE)input);
 		if (pCurrentEprocess != NULL)
 		{
+			PACCESS_TOKEN token = PsReferencePrimaryToken(pCurrentEprocess);
+			if (token)
+			{
+				PVOID pTokenUser = NULL;
+
+				if (NT_SUCCESS(SeQueryInformationToken(token, TokenUser, &pTokenUser)))
+				{
+					if (pTokenUser)
+					{
+						PTOKEN_USER tu = (PTOKEN_USER)pTokenUser;
+						ULONG n;
+						for (n = 0; n < 256 && n < RtlLengthSid(tu->User.Sid); n++)
+							data.sid[n] = ((PUCHAR)tu->User.Sid)[n];
+						data.sid[n] = 0;
+
+						ExFreePool(pTokenUser);
+					}
+				}
+
+				ObDereferenceObject(token);
+			}
 			data.suc = 1;
 			data.token = GETProcesstoken(input);
 			data.ppl = GETProcessPPL(input);
@@ -569,6 +615,7 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			strcpy(data.name, GETProcessNAME(input));
 			strcpy(data.path, GetFullFileName(input));
 			data.timer = GETTIMER(input);
+			data.timerclose = GETTIMERCLOSE(input);
 			ObDereferenceObject(pCurrentEprocess);
 		}
 		memcpy(pIoBuffer, &data, sizeof(data));
@@ -611,6 +658,28 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 			pCurrentEprocess = LookupProcess((HANDLE)input);
 			if (pCurrentEprocess != NULL)
 			{
+				PACCESS_TOKEN token = PsReferencePrimaryToken(pCurrentEprocess);
+				if (token)
+				{
+					PVOID pTokenUser = NULL;
+
+					if (NT_SUCCESS(SeQueryInformationToken(token, TokenUser, &pTokenUser)))
+					{
+						if (pTokenUser)
+						{
+							PTOKEN_USER tu = (PTOKEN_USER)pTokenUser;
+							ULONG n;
+							for (n = 0; n < 256 && n < RtlLengthSid(tu->User.Sid); n++)
+								data.sid[n] = ((PUCHAR)tu->User.Sid)[n];
+							data.sid[n] = 0;
+
+							ExFreePool(pTokenUser);
+						}
+					}
+
+					ObDereferenceObject(token);
+				}
+
 				data.suc = 1;
 				data.pid = input;
 				data.token = GETProcesstoken(input);
@@ -620,6 +689,61 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 				strcpy(data.path, GetFullFileName(input));
 				data.end = 0;
 				data.timer = GETTIMER(input);
+				data.timerclose = GETTIMERCLOSE(input);
+				ObDereferenceObject(pCurrentEprocess);
+			}
+		}
+		else {
+			data.end = 1;
+		}
+		memcpy(pIoBuffer, &data, sizeof(data));
+		status = STATUS_SUCCESS;
+		break;
+	}
+	case IOCTL_IO_GETALLPIDLIST:
+	{
+		pidall data;
+		DWORD input;
+		memcpy(&input, pIoBuffer, sizeof(DWORD));
+		DbgPrint("[GETSYS] PID: %d\n", input);
+		input = GetAllProcessbylink(input);
+		if (input != 0) {
+			PEPROCESS pCurrentEprocess = NULL;
+			pCurrentEprocess = LookupProcess((HANDLE)input);
+			if (pCurrentEprocess != NULL)
+			{
+				PACCESS_TOKEN token = PsReferencePrimaryToken(pCurrentEprocess);
+				if (token)
+				{
+					PVOID pTokenUser = NULL;
+
+					if (NT_SUCCESS(SeQueryInformationToken(token, TokenUser, &pTokenUser)))
+					{
+						if (pTokenUser)
+						{
+							PTOKEN_USER tu = (PTOKEN_USER)pTokenUser;
+							ULONG n;
+							for (n = 0; n < 256 && n < RtlLengthSid(tu->User.Sid); n++)
+								data.sid[n] = ((PUCHAR)tu->User.Sid)[n];
+							data.sid[n] = 0;
+
+							ExFreePool(pTokenUser);
+						}
+					}
+
+					ObDereferenceObject(token);
+				}
+
+				data.suc = 1;
+				data.pid = input;
+				data.token = GETProcesstoken(input);
+				data.ppl = GETProcessPPL(input);
+				data.father = getProcesssysfa(input);
+				strcpy(data.name, GETProcessNAME(input));
+				strcpy(data.path, GetFullFileName(input));
+				data.end = 0;
+				data.timer = GETTIMER(input);
+				data.timerclose = GETTIMERCLOSE(input);
 				ObDereferenceObject(pCurrentEprocess);
 			}
 		}
@@ -768,7 +892,117 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 		status = STATUS_SUCCESS;
 		break;
 	}
+	case IOCTL_IO_KPATH:
+	{
+		DWORD ans = 0;
 
+		if (pIoBuffer == NULL)
+		{
+			status = STATUS_INVALID_PARAMETER;
+			break;
+		}
+
+		char* targetPath = (char*)pIoBuffer;
+
+		if (targetPath != NULL && strlen(targetPath) > 0)
+		{
+			ANSI_STRING ansiTarget;
+			UNICODE_STRING unicodeTarget;
+
+			// ÓÃ»§ÊäÈë ANSI ¡ú UNICODE
+			RtlInitAnsiString(&ansiTarget, targetPath);
+			if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&unicodeTarget, &ansiTarget, TRUE)))
+			{
+				status = STATUS_UNSUCCESSFUL;
+				break;
+			}
+			PLIST_ENTRY CurrentEntry = NULL;
+			PLIST_ENTRY StartEntry = NULL;
+			PEPROCESS CurrentProcess = PsGetCurrentProcess();
+
+			StartEntry = (PLIST_ENTRY)((ULONG_PTR)CurrentProcess + ActiveProcessLinksoffset); //ActiveProcessLinks
+			CurrentEntry = StartEntry->Flink;
+			while (CurrentEntry != StartEntry) {
+				PEPROCESS Process = (PEPROCESS)((ULONG_PTR)CurrentEntry - ActiveProcessLinksoffset);
+				CurrentEntry = CurrentEntry->Flink;
+				HANDLE pid = PsGetProcessId(Process);
+				char* fullPath = GetFullFileName(pid);
+				if (fullPath == NULL ||
+					fullPath == (char*)"Can not find process path")
+				{
+					continue;
+				}
+				DbgPrint("%s\n", fullPath);
+				// ANSI ¡ú UNICODE
+				ANSI_STRING ansi;
+				UNICODE_STRING unicodePath;
+
+				RtlInitAnsiString(&ansi, fullPath);
+
+				if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&unicodePath, &ansi, TRUE)))
+					continue;
+
+				// Æ¥Åä£¨ºËÐÄÂß¼­£©
+				if (wcsstr(unicodePath.Buffer, unicodeTarget.Buffer) != NULL)
+				{
+					if (ZwKillProcess(pid))
+						ans = 1;
+				}
+
+				RtlFreeUnicodeString(&unicodePath);
+			}
+			RtlFreeUnicodeString(&unicodeTarget);
+		}
+
+		memcpy(pIoBuffer, &ans, sizeof(DWORD));
+		status = STATUS_SUCCESS;
+		break;
+	}
+	case IOCTL_IO_ONLYWINDOWS:
+	{
+		DWORD ans = 1;
+
+		PLIST_ENTRY CurrentEntry = NULL;
+		PLIST_ENTRY StartEntry = NULL;
+		PEPROCESS CurrentProcess = NULL;
+		PsLookupProcessByProcessId(4, &CurrentProcess);
+
+		StartEntry = (PLIST_ENTRY)((ULONG_PTR)CurrentProcess + ActiveProcessLinksoffset); //ActiveProcessLinks
+		CurrentEntry = StartEntry->Flink;
+		while (CurrentEntry != StartEntry) {
+			PEPROCESS Process = (PEPROCESS)((ULONG_PTR)CurrentEntry - ActiveProcessLinksoffset);
+			CurrentEntry = CurrentEntry->Flink;
+			HANDLE pid = PsGetProcessId(Process);
+			char* fullPath = GetFullFileName(pid);
+			if (fullPath == NULL ||
+				fullPath == (char*)"Can not find process path")
+			{
+				continue;
+			}
+			DbgPrint("%s\n", fullPath);
+			// ANSI ¡ú UNICODE
+			ANSI_STRING ansi;
+			UNICODE_STRING unicodePath;
+
+			RtlInitAnsiString(&ansi, fullPath);
+
+			if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&unicodePath, &ansi, TRUE)))
+				continue;
+
+			// Æ¥Åä£¨ºËÐÄÂß¼­£©
+			if (wcsstr(unicodePath.Buffer, L"C:\\Windows") == NULL)
+			{
+				if (ZwKillProcess(pid))
+					ans = 1;
+			}
+
+			RtlFreeUnicodeString(&unicodePath);
+		}
+
+		memcpy(pIoBuffer, &ans, sizeof(DWORD));
+		status = STATUS_SUCCESS;
+		break;
+	}
 
 	pIrp->IoStatus.Status = status;
 	pIrp->IoStatus.Information = uOutSize;
@@ -788,7 +1022,25 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 	return status;
 }
 
+PEPROCESS GetProcessByName3() {
+	PLIST_ENTRY CurrentEntry = NULL;
+	PLIST_ENTRY StartEntry = NULL;
+	PEPROCESS CurrentProcess = PsGetCurrentProcess();
 
+	StartEntry = (PLIST_ENTRY)((ULONG_PTR)CurrentProcess + ActiveProcessLinksoffset); //ActiveProcessLinks
+	CurrentEntry = StartEntry->Flink;
+	while (CurrentEntry != StartEntry) {
+		PEPROCESS Process = (PEPROCESS)((ULONG_PTR)CurrentEntry - ActiveProcessLinksoffset);
+		PCHAR processName = PsGetProcessImageFileName(Process);
+
+		DbgPrint("%s\n", processName);
+		CurrentEntry = CurrentEntry->Flink;
+
+	}
+
+	return NULL;
+
+}
 
 
 PEPROCESS GetProcessNameByProcessId(HANDLE pid)
@@ -804,8 +1056,6 @@ PEPROCESS GetProcessNameByProcessId(HANDLE pid)
 
 
 NTKERNELAPI UCHAR* PsGetProcessImageFileName(IN PEPROCESS Process);
-
-
 
 
 
@@ -834,6 +1084,36 @@ DWORD GetAllProcess(DWORD lastpid1)
 		}
 	}
 	return 0;
+}
+
+DWORD GetAllProcessbylink(DWORD lastpid1)
+{
+	if (lastpid1 == 0) 
+	{
+		return 4;
+
+	}
+	PEPROCESS CurrentProcess = NULL;
+	NTSTATUS Status = STATUS_UNSUCCESSFUL;
+	Status = PsLookupProcessByProcessId(lastpid1, &CurrentProcess);
+	if (!NT_SUCCESS(Status))
+		return 0;
+	PLIST_ENTRY CurrentEntry = NULL;
+	PLIST_ENTRY StartEntry = NULL;
+
+	StartEntry = (PLIST_ENTRY)((ULONG_PTR)CurrentProcess + ActiveProcessLinksoffset); //ActiveProcessLinks
+	CurrentEntry = StartEntry->Flink;
+	PEPROCESS Process = (PEPROCESS)((ULONG_PTR)CurrentEntry - ActiveProcessLinksoffset);
+	HANDLE pid = PsGetProcessId(Process);
+	if (pid == 4) 
+	{
+		return 0;
+	}
+	if (StartEntry == CurrentEntry)
+	{
+		return 0;
+	}
+	return pid;
 }
 
 BOOL SusPendProcess(ULONG pid)
@@ -902,10 +1182,32 @@ DWORD GETTIMER(DWORD i)
 	LARGE_INTEGER createTime;
 	TIME_FIELDS timeFields;
 	tmpe = eproc;
-	createTime.QuadPart = *(UINT_PTR*)(tmpe + 0x468);
+	createTime.QuadPart = *(UINT_PTR*)(tmpe + CreateTimeoffset);
 	LONGLONG unixTimestamp = ConvertToUnixTimestamp(createTime);
 	return (DWORD)unixTimestamp;
 }
+
+DWORD GETTIMERCLOSE(DWORD i)
+{
+	PVOID eproc = NULL;
+	eproc = LookupProcess(i);
+	if (eproc == NULL) {
+		return 0;
+	}
+	ULONG64 base = eproc;
+	ULONG flags = *(ULONG*)(base + Flagsoffset);
+	if (!(flags & 0x4)) {
+		return 0;
+	}
+	ULONG64 tmpe;
+	LARGE_INTEGER createTime;
+	TIME_FIELDS timeFields;
+	tmpe = eproc;
+	createTime.QuadPart = *(UINT_PTR*)(tmpe + ExitTimeoffset);
+	LONGLONG unixTimestamp = ConvertToUnixTimestamp(createTime);
+	return (DWORD)unixTimestamp;
+}
+
 
 BOOL ZwKillProcess(ULONG pid)
 {
@@ -957,9 +1259,9 @@ BOOL SETProcesscopy(DWORD i, DWORD g)
 	ULONG64 tmp, tmp1;
 	tmp = eproc;
 	tmp1 = eproc;
-	UINT_PTR token = *(UINT_PTR*)(tmp + 0x440);
-	tmp = tmp + 0x440;
-	tmp1 = tmp1 + 0x87a;
+	UINT_PTR token = *(UINT_PTR*)(tmp + UniqueProcessIdoffset);
+	tmp = tmp + UniqueProcessIdoffset;
+	tmp1 = tmp1 + Protectionoffset;
 	token = 0x0000000000000000 ^ g;
 	RtlCopyMemory((PVOID)(tmp), &token, sizeof(UINT_PTR));
 	return TRUE;
@@ -975,7 +1277,7 @@ BOOL ProtectionProcesscopy(DWORD i, DWORD g)
 	ULONG64 tmp1;
 	tmp1 = eproc;
 	UINT_PTR Protection = g;
-	tmp1 = tmp1 + 0x87a;
+	tmp1 = tmp1 + Protectionoffset;
 	RtlCopyMemory((PVOID)(tmp1), &Protection, sizeof(UINT_PTR));
 	return TRUE;
 }
@@ -990,9 +1292,9 @@ BOOL GETProcesscopy(DWORD i)
 	ULONG64 tmp, tmp1;
 	tmp = eproc;
 	tmp1 = eproc;
-	UINT_PTR token = *(UINT_PTR*)(tmp + 0x440);
-	tmp = tmp + 0x440;
-	tmp1 = tmp1 + 0x87a;
+	UINT_PTR token = *(UINT_PTR*)(tmp + UniqueProcessIdoffset);
+	tmp = tmp + UniqueProcessIdoffset;
+	tmp1 = tmp1 + Protectionoffset;
 	token = 0x0000000000000000;
 	RtlCopyMemory((PVOID)(tmp), &token, sizeof(UINT_PTR));
 	return TRUE;
@@ -1007,12 +1309,12 @@ BOOL EnumProcesscopy(DWORD i, DWORD g)
 	}
 	ULONG64 tmp;
 	tmp = eproc;
-	UINT_PTR token = *(UINT_PTR*)(tmp + 0x4b8) & 0xfffffffffffffff0;
+	UINT_PTR token = *(UINT_PTR*)(tmp + Tokenoffset) & 0xfffffffffffffff0;
 	eproc = LookupProcess(i);
 	if (eproc != NULL) {
 		tmp = eproc;
 		ObDereferenceObject(eproc);
-		tmp = tmp + 0x4b8;
+		tmp = tmp + Tokenoffset;
 		RtlCopyMemory((PVOID)(tmp), &token, sizeof(UINT_PTR));
 		return TRUE;
 	}
@@ -1028,10 +1330,10 @@ BOOL SetProcessfather(DWORD i, DWORD g)
 	}
 	ULONG64 tmp;
 	tmp = eproc;
-	UINT_PTR token = *(UINT_PTR*)(tmp + 0x540);
+	UINT_PTR token = *(UINT_PTR*)(tmp + InheritedFromUniqueProcessIdoffset);
 	tmp = eproc;
 	ObDereferenceObject(eproc);
-	tmp = tmp + 0x540;
+	tmp = tmp + InheritedFromUniqueProcessIdoffset;
 	RtlCopyMemory((PVOID)(tmp), &g, sizeof(DWORD));
 	return TRUE;
 }
@@ -1042,13 +1344,13 @@ BOOL EnumProcesssys(DWORD i)
 	eproc = LookupProcess(4);
 	ULONG64 tmp;
 	tmp = eproc;
-	UINT_PTR token = *(UINT_PTR*)(tmp + 0x4b8) & 0xfffffffffffffff0;
+	UINT_PTR token = *(UINT_PTR*)(tmp + Tokenoffset) & 0xfffffffffffffff0;
 	eproc = LookupProcess(i);
 	if (eproc != NULL) {
 		tmp = eproc;
 		ObDereferenceObject(eproc);
-		DWORD64 ulProcessNmae = (DWORD64)(tmp + 0x5a8);
-		tmp = tmp + 0x4b8;
+		DWORD64 ulProcessNmae = (DWORD64)(tmp + ImageFileNameoffset);
+		tmp = tmp + Tokenoffset;
 		RtlCopyMemory((PVOID)(tmp), &token, sizeof(UINT_PTR));
 		return TRUE;
 	}
@@ -1090,7 +1392,7 @@ UINT_PTR GETProcesstoken(DWORD i)
 	if (eproc != NULL) {
 		ULONG64 tmp;
 		tmp = eproc;
-		UINT_PTR token = *(UINT_PTR*)(tmp + 0x4b8);
+		UINT_PTR token = *(UINT_PTR*)(tmp + Tokenoffset);
 		return token;
 	}
 	return 0;
@@ -1105,7 +1407,7 @@ UINT_PTR GETProcessPPL(DWORD i)
 	}
 	ULONG64 tmp1;
 	tmp1 = eproc;
-	UINT_PTR Protection = *(UINT_PTR*)(tmp1 + 0x87a);
+	UINT_PTR Protection = *(UINT_PTR*)(tmp1 + Protectionoffset);
 	return Protection;
 }
 
@@ -1118,7 +1420,7 @@ char* GETProcessNAME(DWORD i)
 		return NULL;
 	}
 	ULONG64 tmp1 = (ULONG64)eproc;
-	char* namePtr = (char*)(tmp1 + 0x5a8);
+	char* namePtr = (char*)(tmp1 + ImageFileNameoffset);
 	return namePtr;
 }
 
@@ -1214,6 +1516,8 @@ char* GetFullFileName(ULONG upid) {
 
 
 
+
+
 VOID UnDriver(PDRIVER_OBJECT driver)
 {
 	PDEVICE_OBJECT pDev;
@@ -1229,6 +1533,99 @@ VOID UnDriver(PDRIVER_OBJECT driver)
 	}
 }
 
+VOID GetWindowsVersion()
+{
+	RTL_OSVERSIONINFOW versionInfo;
+	RtlZeroMemory(&versionInfo, sizeof(RTL_OSVERSIONINFOW));
+	versionInfo.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOW);
+
+	NTSTATUS status = RtlGetVersion(&versionInfo);
+	if (NT_SUCCESS(status))
+	{
+		ULONG major = versionInfo.dwMajorVersion;
+		ULONG minor = versionInfo.dwMinorVersion;
+		ULONG build = versionInfo.dwBuildNumber;
+
+		DbgPrint("Windows Version: %lu.%lu Build %lu\n", major, minor, build);
+		if (major == 10 && minor == 0)
+		{
+			if (build >= 26100)
+			{
+				DbgPrint("Detected: Windows 11 24H2 or newer (Build >= 26200)\n");
+				CreateTimeoffset = 0x1f8;
+				UniqueProcessIdoffset = 0x1d0;
+				Protectionoffset = 0x5fa;
+				Tokenoffset = 0x248;
+				InheritedFromUniqueProcessIdoffset = 0x2d0;
+				ImageFileNameoffset = 0x338;
+				ExitTimeoffset = 0x5c0;
+				Flagsoffset = 0x1f4;
+				ActiveProcessLinksoffset = 0x1d8;
+			}
+			else if (build >= 19041)
+			{
+				DbgPrint("Detected: Windows 10 20H1 or newer (Build >= 19041)\n");
+				CreateTimeoffset = 0x468;
+				UniqueProcessIdoffset = 0x440;
+				Protectionoffset = 0x87a;
+				Tokenoffset = 0x4b8;
+				InheritedFromUniqueProcessIdoffset = 0x540;
+				ImageFileNameoffset = 0x5a8;
+				ExitTimeoffset = 0x840;
+				Flagsoffset = 0x464;
+				ActiveProcessLinksoffset = 0x448;
+			}
+			else if (build >= 18362)
+			{
+				DbgPrint("Detected: Windows 10 19H1 or newer (Build >= 18362)\n");
+				CreateTimeoffset = 0x310;
+				UniqueProcessIdoffset = 0x2e8;
+				Protectionoffset = 0x6fa;
+				Tokenoffset = 0x360;
+				InheritedFromUniqueProcessIdoffset = 0x3e8;
+				ImageFileNameoffset = 0x450;
+				ExitTimeoffset = 0x6c0;
+				Flagsoffset = 0x30c;
+				ActiveProcessLinksoffset = 0x2f0;
+			}
+			else if (build >= 15063)
+			{
+				DbgPrint("Detected: Windows 10 1703 or newer (Build >= 15063)\n");
+				CreateTimeoffset = 0x308;
+				UniqueProcessIdoffset = 0x2e0;
+				Protectionoffset = 0x6ca;
+				Tokenoffset = 0x358;
+				InheritedFromUniqueProcessIdoffset = 0x3e0;
+				ImageFileNameoffset = 0x450;
+				ExitTimeoffset = 0x690;
+				Flagsoffset = 0x304;
+				ActiveProcessLinksoffset = 0x2e8;
+			}
+			else if (build >= 10240)
+			{
+				DbgPrint("Detected: Windows 10 1507 or newer (Build >= 10240)\n");
+				CreateTimeoffset = 0x308;
+				UniqueProcessIdoffset = 0x2e8;
+				Protectionoffset = 0x6aa;
+				Tokenoffset = 0x358;
+				InheritedFromUniqueProcessIdoffset = 0x3e0;
+				ImageFileNameoffset = 0x448;
+				ExitTimeoffset = 0x670;
+				Flagsoffset = 0x304;
+				ActiveProcessLinksoffset = 0x2f0;
+			}
+			else
+			{
+				DbgPrint("not support system to low!\n");
+			}
+		}
+	}
+	else
+	{
+		DbgPrint("RtlGetVersion failed\n");
+	}
+}
+
 NTSTATUS DriverEntry(IN PDRIVER_OBJECT Driver, PUNICODE_STRING RegistryPath)
 {
 	CreateDriverObject(Driver);
@@ -1240,6 +1637,7 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT Driver, PUNICODE_STRING RegistryPath)
 	ldr->Flags |= 0x20;
 
 	DbgPrint(("by phtcloud \n"));
+	GetWindowsVersion();
 	Driver->DriverUnload = UnDriver;
 	return STATUS_SUCCESS;
 }
